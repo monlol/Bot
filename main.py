@@ -31,11 +31,11 @@ ANTI_NUKE = True
 ANTI_SPAM = True
 ANTI_RAID = True
 
-ALLOWED_ROLE_ID = None          # Role được phép dùng lệnh (set bằng !set_admin_role)
-ALLOWED_USERS = []              # Danh sách user ID được phép dùng lệnh
+ALLOWED_ROLE_ID = None
+ALLOWED_USERS = []
 
-# Quản lý các task solo đang chạy
-solo_tasks = {}  # key: channel_id, value: asyncio.Task
+# Quản lý task solo
+solo_tasks = {}
 
 BAD_WORDS = ["địt","lồn","cặc","đụ","vcl","dm","đmm","cc","loz","lol","cac","duma","ditme","fuck","shit","bitch","đĩ","mẹ kiếp","chết tiệt"]
 SCAM_DOMAINS = ["bit.ly","tinyurl.com","rebrand.ly","discord.gift","steamcommmunity.com","nitro-steam.com","free-discord-nitro.com"]
@@ -48,11 +48,11 @@ ALLOWED_ROLES = []
 user_messages = defaultdict(list)
 user_stickers = defaultdict(list)
 join_times = []
-RAID_MODE = True
+RAID_MODE = False
 log_channel_id = None
 violation_count = defaultdict(int)
 
-# ========== HÀM KIỂM TRA QUYỀN ==========
+# ========== KIỂM TRA QUYỀN ==========
 def has_admin_role():
     async def predicate(ctx):
         if ctx.author.id == OWNER_ID:
@@ -141,7 +141,6 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    # Miễn trừ cho admin/owner
     if message.author.id == OWNER_ID or message.author.guild_permissions.administrator or message.author.id == message.guild.owner_id:
         await bot.process_commands(message)
         return
@@ -190,7 +189,6 @@ async def on_message(message):
             await punish(f"Spam tin nhắn ({len(user_messages[user.id])} tin / {SPAM_WINDOW}s)")
             return
 
-    # Anti scam, invite, ảnh scam, NSFW
     urls = re.findall(r"(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)", content)
     for url in urls:
         if any(scam in url for scam in SCAM_DOMAINS):
@@ -254,7 +252,7 @@ async def on_member_ban(guild, user):
                 pass
             break
 
-# ========== LỆNH QUẢN TRỊ & GIẢI TRÍ ==========
+# ========== LỆNH QUẢN TRỊ ==========
 @bot.command()
 async def test(ctx):
     await ctx.send("🤖 Bot bảo vệ đang hoạt động!")
@@ -271,7 +269,7 @@ async def dzai(ctx):
     embed.add_field(name="!mute @user <thời gian> [lý do]", value="Mute người dùng (vd: 10m, 2h, 1d)", inline=False)
     embed.add_field(name="!kick @user [lý do]", value="Kick người dùng", inline=False)
     embed.add_field(name="!ban @user [lý do]", value="Ban người dùng", inline=False)
-    embed.add_field(name="!solo @user <số lượng> <nội dung> [ping=yes/no] [emoji]", value="Đấu nhau (spam có thể dừng bằng !stop_solo)", inline=False)
+    embed.add_field(name="!solo @user <số lượng> <nội dung> [emoji]", value="Đấu nhau (tự động ping, có thể dừng bằng !stop_solo)", inline=False)
     embed.add_field(name="!stop_solo", value="Dừng cuộc solo trong kênh hiện tại", inline=False)
     embed.add_field(name="!toggle_nuke on/off", value="Bật/tắt chống Nuke", inline=False)
     embed.add_field(name="!toggle_spam on/off", value="Bật/tắt chống spam", inline=False)
@@ -463,13 +461,12 @@ async def ban(ctx, member: discord.Member, *, reason: str = "Không có lý do")
     await member.ban(reason=reason)
     await ctx.send(f"🔨 Đã ban {member.mention} (lý do: {reason})")
 
-# ========== LỆNH SOLO MỚI (hỗ trợ nội dung có dấu cách, dừng được) ==========
+# ========== LỆNH SOLO MỚI (tự động ping, không cần ping flag) ==========
 @bot.command()
-async def solo(ctx, target: discord.Member, amount: int, *, content_with_ping_and_emoji: str = ""):
-    """Đấu nhau bằng spam. Cú pháp: !solo @user <số lượng> <nội dung> [ping=yes/no] [emoji]
-       Ví dụ: !solo @dzai 10 chết đi yes 😈
-       Nội dung có thể chứa dấu cách. Mặc định ping=no, không emoji.
-       Số lượng tối đa 9999 (khuyến cáo dưới 200)."""
+async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: str = ""):
+    """Đấu nhau bằng spam. Cú pháp: !solo @user <số lượng> <nội dung> [emoji]
+       Ví dụ: !solo @dzai 10 chết đi 😈
+       Nội dung có thể chứa dấu cách. Tự động ping người bị solo."""
     
     if amount > 9999:
         await ctx.send("❌ Số lượng không được vượt quá 9999.")
@@ -478,48 +475,42 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_ping_an
         await ctx.send("❌ Số lượng phải lớn hơn 0.")
         return
     
-    # Phân tích nội dung để tách ping và emoji (tuỳ chọn)
-    # Định dạng: [nội dung] [ping=yes/no] [emoji]
-    parts = content_with_ping_and_emoji.rsplit(' ', 2) if content_with_ping_and_emoji else []
-    if len(parts) == 3:
-        content, ping_flag, emoji = parts
-    elif len(parts) == 2:
-        # Có thể là (content, ping) hoặc (content, emoji)
-        if parts[1].lower() in ['yes', 'no']:
-            content, ping_flag = parts
-            emoji = ""
+    # Tách emoji nếu có (từ cuối cùng là emoji)
+    content = content_with_emoji
+    emoji = ""
+    words = content_with_emoji.rsplit(' ', 1)
+    if len(words) == 2:
+        last_word = words[1]
+        emoji_pattern = re.compile(r'[\U00010000-\U0010FFFF]', flags=re.UNICODE)
+        if emoji_pattern.search(last_word):
+            emoji = last_word
+            content = words[0]
         else:
-            content, emoji = parts
-            ping_flag = "no"
-    elif len(parts) == 1:
-        content = parts[0]
-        ping_flag = "no"
-        emoji = ""
+            content = content_with_emoji
     else:
-        content = "spam"
-        ping_flag = "no"
-        emoji = ""
+        content = content_with_emoji
     
-    ping = ping_flag.lower() == "yes"
+    if not content:
+        content = "spam"
+    
     msg_content = content
     if emoji:
         msg_content += f" {emoji}"
     
-    # Hủy task solo cũ trong kênh này nếu có
+    # Hủy solo cũ trong kênh
     if ctx.channel.id in solo_tasks and not solo_tasks[ctx.channel.id].done():
         solo_tasks[ctx.channel.id].cancel()
         await ctx.send("⏹️ Đã hủy solo cũ trong kênh này.")
         await asyncio.sleep(0.5)
     
-    # Định nghĩa hàm spam
+    # Gửi thông báo bắt đầu TRƯỚC
+    await ctx.send(f"🎮 Bắt đầu solo {amount} lần với {target.mention}! (nội dung: {msg_content})")
+    await asyncio.sleep(0.5)  # Đảm bảo thông báo hiện trước khi spam
+    
     async def spam_task():
         try:
             for i in range(amount):
-                if ping:
-                    await ctx.send(f"{target.mention} {msg_content}")
-                else:
-                    await ctx.send(msg_content)
-                # Delay nhẹ để tránh rate limit
+                await ctx.send(f"{target.mention} {msg_content}")
                 if amount > 200:
                     await asyncio.sleep(0.5)
                 elif amount > 50:
@@ -536,7 +527,6 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_ping_an
     
     task = asyncio.create_task(spam_task())
     solo_tasks[ctx.channel.id] = task
-    await ctx.send(f"🎮 Bắt đầu solo {amount} lần với {target.mention}! (nội dung: {msg_content})")
 
 @bot.command()
 async def stop_solo(ctx):
