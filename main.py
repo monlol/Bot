@@ -4,6 +4,7 @@ from datetime import timedelta
 from collections import defaultdict
 import re
 import time
+import asyncio
 from dotenv import load_dotenv
 import os
 from keep_alive import keep_alive
@@ -12,7 +13,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents, dzai_command=None)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ========== CẤU HÌNH ==========
 OWNER_ID = 1075422580833529879   # 👈 THAY BẰNG ID DISCORD CỦA BẠN
@@ -30,7 +31,8 @@ ANTI_NUKE = True
 ANTI_SPAM = True
 ANTI_RAID = True
 
-ALLOWED_ROLE_ID = None
+ALLOWED_ROLE_ID = None          # Role được phép dùng lệnh (set bằng !set_admin_role)
+ALLOWED_USERS = []              # Danh sách user ID được phép dùng lệnh
 
 BAD_WORDS = ["địt","lồn","cặc","đụ","vcl","dm","đmm","cc","loz","lol","cac","duma","ditme","fuck","shit","bitch","đĩ","mẹ kiếp","chết tiệt"]
 SCAM_DOMAINS = ["bit.ly","tinyurl.com","rebrand.ly","discord.gift","steamcommmunity.com","nitro-steam.com","free-discord-nitro.com"]
@@ -43,21 +45,24 @@ ALLOWED_ROLES = []
 user_messages = defaultdict(list)
 user_stickers = defaultdict(list)
 join_times = []
-RAID_MODE = True
+RAID_MODE = False
 log_channel_id = None
 violation_count = defaultdict(int)
 
 # ========== HÀM KIỂM TRA QUYỀN ==========
 def has_admin_role():
     async def predicate(ctx):
-        if ctx.author.id == OWNER_ID or ctx.author.id == ctx.guild.owner_id:
+        if ctx.author.id == OWNER_ID:
             return True
-        if ALLOWED_ROLE_ID is None:
-            return False
-        role = ctx.guild.get_role(ALLOWED_ROLE_ID)
-        if role is None:
-            return False
-        return role in ctx.author.roles
+        if ctx.author.id == ctx.guild.owner_id:
+            return True
+        if ctx.author.id in ALLOWED_USERS:
+            return True
+        if ALLOWED_ROLE_ID is not None:
+            role = ctx.guild.get_role(ALLOWED_ROLE_ID)
+            if role and role in ctx.author.roles:
+                return True
+        return False
     return commands.check(predicate)
 
 # ========== HÀM HỖ TRỢ ==========
@@ -125,19 +130,18 @@ async def handle_violation(user, guild, reason):
 @bot.event
 async def on_ready():
     print(f"✅ Bot: {bot.user.name} (ID: {bot.user.id})")
-    print(f"👑 Owner bot (bạn) có ID: {OWNER_ID}")
-    print("🛡️ Bot sẽ không xóa tin nhắn của bạn, admin, và owner server.")
+    print(f"👑 Owner bot: {OWNER_ID}")
+    print("🛡️ Bot bảo vệ đã sẵn sàng!")
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
 
-    # === KHÔNG XÓA TIN NHẮN CỦA: OWNER_ID, ADMIN, OWNER SERVER ===
+    # Miễn trừ cho admin/owner
     if message.author.id == OWNER_ID or message.author.guild_permissions.administrator or message.author.id == message.guild.owner_id:
         await bot.process_commands(message)
         return
-    # ============================================================
 
     ctx = await bot.get_context(message)
     content = message.content
@@ -183,6 +187,7 @@ async def on_message(message):
             await punish(f"Spam tin nhắn ({len(user_messages[user.id])} tin / {SPAM_WINDOW}s)")
             return
 
+    # Anti scam, invite, ảnh scam, NSFW
     urls = re.findall(r"(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)", content)
     for url in urls:
         if any(scam in url for scam in SCAM_DOMAINS):
@@ -246,10 +251,10 @@ async def on_member_ban(guild, user):
                 pass
             break
 
-# ========== LỆNH ==========
+# ========== LỆNH QUẢN TRỊ & GIẢI TRÍ ==========
 @bot.command()
 async def test(ctx):
-    await ctx.send("🤖 Bot bảo vệ đang hoạt động")
+    await ctx.send("🤖 Bot bảo vệ đang hoạt động!")
 
 @bot.command()
 async def dzai(ctx):
@@ -257,6 +262,13 @@ async def dzai(ctx):
     embed.add_field(name="!test", value="Kiểm tra bot", inline=False)
     embed.add_field(name="!set_log_channel #kênh", value="Đặt kênh log", inline=False)
     embed.add_field(name="!set_admin_role @role", value="Đặt role quản trị bot", inline=False)
+    embed.add_field(name="!add_admin_user @user", value="Thêm user được dùng lệnh", inline=False)
+    embed.add_field(name="!remove_admin_user @user", value="Xóa user khỏi danh sách admin", inline=False)
+    embed.add_field(name="!list_admin_users", value="Xem danh sách user admin", inline=False)
+    embed.add_field(name="!mute @user <thời gian> [lý do]", value="Mute người dùng (vd: 10m, 2h, 1d)", inline=False)
+    embed.add_field(name="!kick @user [lý do]", value="Kick người dùng", inline=False)
+    embed.add_field(name="!ban @user [lý do]", value="Ban người dùng", inline=False)
+    embed.add_field(name="!solo @user <nd> <sl> [ping=yes/no] [emoji]", value="Đấu nhau (spam)", inline=False)
     embed.add_field(name="!toggle_nuke on/off", value="Bật/tắt chống Nuke", inline=False)
     embed.add_field(name="!toggle_spam on/off", value="Bật/tắt chống spam", inline=False)
     embed.add_field(name="!toggle_raid on/off", value="Bật/tắt chống raid", inline=False)
@@ -277,7 +289,40 @@ async def dzai(ctx):
 async def set_admin_role(ctx, role: discord.Role):
     global ALLOWED_ROLE_ID
     ALLOWED_ROLE_ID = role.id
-    await ctx.send(f"✅ Đã đặt role quản trị bot là {role.mention}. Owner server và ai có role này sẽ dùng được lệnh.")
+    await ctx.send(f"✅ Đã đặt role quản trị bot là {role.mention}.")
+
+@bot.command()
+@commands.is_owner()
+async def add_admin_user(ctx, user: discord.User):
+    if user.id in ALLOWED_USERS:
+        await ctx.send(f"ℹ️ {user.mention} đã có trong danh sách.")
+        return
+    ALLOWED_USERS.append(user.id)
+    await ctx.send(f"✅ Đã thêm {user.mention} vào danh sách admin.")
+
+@bot.command()
+@commands.is_owner()
+async def remove_admin_user(ctx, user: discord.User):
+    if user.id not in ALLOWED_USERS:
+        await ctx.send(f"ℹ️ {user.mention} không có trong danh sách.")
+        return
+    ALLOWED_USERS.remove(user.id)
+    await ctx.send(f"✅ Đã xóa {user.mention} khỏi danh sách admin.")
+
+@bot.command()
+@commands.is_owner()
+async def list_admin_users(ctx):
+    if not ALLOWED_USERS:
+        await ctx.send("📃 Chưa có user nào được thêm.")
+        return
+    mentions = []
+    for uid in ALLOWED_USERS:
+        try:
+            u = await bot.fetch_user(uid)
+            mentions.append(u.mention)
+        except:
+            mentions.append(f"<@{uid}>")
+    await ctx.send(f"📋 **Admin users:** {', '.join(mentions)}")
 
 @bot.command()
 @has_admin_role()
@@ -384,10 +429,60 @@ async def check_violations(ctx, member: discord.Member = None):
     count = violation_count.get(member.id, 0)
     await ctx.send(f"📊 {member.mention} có {count}/5 lần vi phạm.")
 
+# ========== LỆNH MUTE, KICK, BAN, SOLO ==========
+@bot.command()
+@has_admin_role()
+async def mute(ctx, member: discord.Member, duration: str = "1h", *, reason: str = "Không có lý do"):
+    units = {"m": 60, "h": 3600, "d": 86400}
+    try:
+        if duration[-1] in units:
+            seconds = int(duration[:-1]) * units[duration[-1]]
+        else:
+            seconds = int(duration) * 60
+    except:
+        seconds = 3600
+    if seconds > 28 * 86400:
+        seconds = 28 * 86400
+    until = discord.utils.utcnow() + timedelta(seconds=seconds)
+    await member.timeout(until, reason=reason)
+    await ctx.send(f"🔇 Đã mute {member.mention} trong **{duration}** (lý do: {reason})")
+
+@bot.command()
+@has_admin_role()
+async def kick(ctx, member: discord.Member, *, reason: str = "Không có lý do"):
+    await member.kick(reason=reason)
+    await ctx.send(f"👢 Đã kick {member.mention} (lý do: {reason})")
+
+@bot.command()
+@has_admin_role()
+async def ban(ctx, member: discord.Member, *, reason: str = "Không có lý do"):
+    await member.ban(reason=reason)
+    await ctx.send(f"🔨 Đã ban {member.mention} (lý do: {reason})")
+
+@bot.command()
+async def solo(ctx, target: discord.Member, content: str, amount: int, ping: str = "no", emoji: str = ""):
+    if amount > 30:
+        await ctx.send("❌ Số lượng không được vượt quá 30.")
+        return
+    if amount <= 0:
+        await ctx.send("❌ Số lượng phải > 0.")
+        return
+    msg = content
+    if emoji:
+        msg += f" {emoji}"
+    for i in range(amount):
+        if ping.lower() == "yes":
+            await ctx.send(f"{target.mention} {msg}")
+        else:
+            await ctx.send(msg)
+        if amount > 10:
+            await asyncio.sleep(0.5)
+    await ctx.send(f"✅ Solo {amount} lần với {target.mention} xong!")
+
 # ========== CHẠY BOT ==========
 if __name__ == "__main__":
     if not TOKEN:
-        print("❌ Không tìm thấy DISCORD_TOKEN trong file .env")
+        print("❌ Không tìm thấy DISCORD_TOKEN trong biến môi trường.")
     else:
         keep_alive()
         bot.run(TOKEN)
