@@ -267,9 +267,11 @@ async def dzai(ctx):
     embed.add_field(name="!remove_admin_user @user", value="Xóa user khỏi danh sách admin", inline=False)
     embed.add_field(name="!list_admin_users", value="Xem danh sách user admin", inline=False)
     embed.add_field(name="!mute @user <thời gian> [lý do]", value="Mute người dùng (vd: 10m, 2h, 1d)", inline=False)
+    embed.add_field(name="!unmute @user [lý do]", value="Gỡ mute người dùng", inline=False)
     embed.add_field(name="!kick @user [lý do]", value="Kick người dùng", inline=False)
     embed.add_field(name="!ban @user [lý do]", value="Ban người dùng", inline=False)
-    embed.add_field(name="!solo @user <số lượng> <nội dung> [emoji]", value="Đấu nhau (tự động ping, có thể dừng bằng !stop_solo)", inline=False)
+    embed.add_field(name="!unban <user_id> [lý do]", value="Unban người dùng bằng ID", inline=False)
+    embed.add_field(name="!solo @user <số lượng> <nội dung> [emoji]", value="Đấu nhau (tự động ping, dừng bằng !stop_solo)", inline=False)
     embed.add_field(name="!stop_solo", value="Dừng cuộc solo trong kênh hiện tại", inline=False)
     embed.add_field(name="!toggle_nuke on/off", value="Bật/tắt chống Nuke", inline=False)
     embed.add_field(name="!toggle_spam on/off", value="Bật/tắt chống spam", inline=False)
@@ -431,7 +433,7 @@ async def check_violations(ctx, member: discord.Member = None):
     count = violation_count.get(member.id, 0)
     await ctx.send(f"📊 {member.mention} có {count}/5 lần vi phạm.")
 
-# ========== LỆNH MUTE, KICK, BAN ==========
+# ========== LỆNH MUTE, KICK, BAN, UNMUTE, UNBAN ==========
 @bot.command()
 @has_admin_role()
 async def mute(ctx, member: discord.Member, duration: str = "1h", *, reason: str = "Không có lý do"):
@@ -451,6 +453,12 @@ async def mute(ctx, member: discord.Member, duration: str = "1h", *, reason: str
 
 @bot.command()
 @has_admin_role()
+async def unmute(ctx, member: discord.Member, *, reason: str = "Không có lý do"):
+    await member.timeout(None, reason=reason)
+    await ctx.send(f"🔊 Đã unmute {member.mention} (lý do: {reason})")
+
+@bot.command()
+@has_admin_role()
 async def kick(ctx, member: discord.Member, *, reason: str = "Không có lý do"):
     await member.kick(reason=reason)
     await ctx.send(f"👢 Đã kick {member.mention} (lý do: {reason})")
@@ -461,13 +469,23 @@ async def ban(ctx, member: discord.Member, *, reason: str = "Không có lý do")
     await member.ban(reason=reason)
     await ctx.send(f"🔨 Đã ban {member.mention} (lý do: {reason})")
 
-# ========== LỆNH SOLO MỚI (tự động ping, không cần ping flag) ==========
+@bot.command()
+@has_admin_role()
+async def unban(ctx, user_id: int, *, reason: str = "Không có lý do"):
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user, reason=reason)
+        await ctx.send(f"✅ Đã unban {user.mention} (ID: {user_id}) với lý do: {reason}")
+    except discord.NotFound:
+        await ctx.send(f"❌ Không tìm thấy user có ID {user_id} hoặc user chưa bị ban.")
+    except discord.Forbidden:
+        await ctx.send("❌ Bot không có quyền unban.")
+    except Exception as e:
+        await ctx.send(f"❌ Lỗi: {e}")
+
+# ========== LỆNH SOLO MỚI ==========
 @bot.command()
 async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: str = ""):
-    """Đấu nhau bằng spam. Cú pháp: !solo @user <số lượng> <nội dung> [emoji]
-       Ví dụ: !solo @dzai 10 chết đi 😈
-       Nội dung có thể chứa dấu cách. Tự động ping người bị solo."""
-    
     if amount > 9999:
         await ctx.send("❌ Số lượng không được vượt quá 9999.")
         return
@@ -475,7 +493,6 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
         await ctx.send("❌ Số lượng phải lớn hơn 0.")
         return
     
-    # Tách emoji nếu có (từ cuối cùng là emoji)
     content = content_with_emoji
     emoji = ""
     words = content_with_emoji.rsplit(' ', 1)
@@ -497,15 +514,13 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
     if emoji:
         msg_content += f" {emoji}"
     
-    # Hủy solo cũ trong kênh
     if ctx.channel.id in solo_tasks and not solo_tasks[ctx.channel.id].done():
         solo_tasks[ctx.channel.id].cancel()
         await ctx.send("⏹️ Đã hủy solo cũ trong kênh này.")
         await asyncio.sleep(0.5)
     
-    # Gửi thông báo bắt đầu TRƯỚC
     await ctx.send(f"🎮 Bắt đầu solo {amount} lần với {target.mention}! (nội dung: {msg_content})")
-    await asyncio.sleep(0.5)  # Đảm bảo thông báo hiện trước khi spam
+    await asyncio.sleep(0.5)
     
     async def spam_task():
         try:
@@ -530,7 +545,6 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
 
 @bot.command()
 async def stop_solo(ctx):
-    """Dừng cuộc solo đang diễn ra trong kênh hiện tại."""
     if ctx.channel.id in solo_tasks and not solo_tasks[ctx.channel.id].done():
         solo_tasks[ctx.channel.id].cancel()
         await ctx.send("⏹️ Đã yêu cầu dừng solo. Vui lòng chờ một lát...")
