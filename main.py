@@ -302,60 +302,47 @@ async def test(ctx):
 
 @bot.command(aliases=['help'])
 async def dzai(ctx):
-    # Tạo nội dung cho description với 2 cột song song
-    left_col = []
-    right_col = []
-    commands_list = [
-        ("!test", "Kiểm tra bot"),
-        ("!scan [số lượng]", "Quét kênh xóa tin vi phạm"),
-        ("!set_log_channel #kênh", "Đặt kênh log"),
-        ("!set_admin_role @role", "Đặt role quản trị bot"),
-        ("!add_admin_user @user", "Thêm user được dùng lệnh"),
-        ("!remove_admin_user @user", "Xóa user khỏi danh sách admin"),
-        ("!list_admin_users", "Xem danh sách user admin"),
-        ("!mute @user <thời gian>", "Mute (vd: 10m, 2h, 1d)"),
-        ("!unmute @user", "Gỡ mute"),
-        ("!kick @user", "Kick thành viên"),
-        ("!ban @user", "Ban thành viên"),
-        ("!unban <user_id>", "Unban bằng ID"),
-        ("!solo @user <sl> <nd> [emoji]", "Đấu spam (dừng bằng !stop_solo)"),
-        ("!stop_solo", "Dừng solo"),
-        ("!allow_channel #kênh", "Cho phép kênh spam/link"),
-        ("!allow_role @role", "Cho phép role gửi link"),
-        ("!allow_badword <từ>", "Cho phép từ chửi bậy"),
-        ("!allow_bad_member @user", "Cho phép member chửi bậy"),
-        ("!remove_allow_badword <từ>", "Xóa từ khỏi whitelist"),
-        ("!remove_allow_bad_member @user", "Xóa member khỏi whitelist"),
-        ("!add_scam_domain <domain>", "Thêm domain lừa đảo"),
-        ("!add_badword <từ>", "Thêm từ chửi bậy (cấm)"),
-        ("!add_scam_image_keyword <từ>", "Thêm từ khóa ảnh scam"),
-        ("!add_nsfw_keyword <từ>", "Thêm từ khóa NSFW"),
-        ("!toggle_nuke on/off", "Bật/tắt chống Nuke"),
-        ("!toggle_spam on/off", "Bật/tắt chống spam"),
-        ("!toggle_raid on/off", "Bật/tắt chống raid"),
-        ("!toggle_translate on/off", "Bật/tắt auto dịch"),
-        ("!raid_mode_status", "Xem trạng thái RAID"),
-        ("!reset_raid_mode", "Tắt RAID mode"),
-        ("!reset_violations @user", "Reset số lần vi phạm"),
-        ("!check_violations @user", "Xem số lần vi phạm"),
-    ]
-    # Chia làm 2 cột
-    half = (len(commands_list) + 1) // 2
-    for cmd, desc in commands_list[:half]:
-        left_col.append(f"**{cmd}** – {desc}")
-    for cmd, desc in commands_list[half:]:
-        right_col.append(f"**{cmd}** – {desc}")
-    # Tạo description với 2 cột dạng markdown table đơn giản
-    description = "```\n" + "Chú thích: <thời gian> = 10m, 2h, 1d; <sl> = số lượng; <nd> = nội dung\n" + "```\n"
-    max_len = max(len(line) for line in left_col + right_col) if left_col else 0
-    lines = []
-    for i in range(max(len(left_col), len(right_col))):
-        left = left_col[i] if i < len(left_col) else ""
-        right = right_col[i] if i < len(right_col) else ""
-        lines.append(f"{left:<{max_len}}   {right}")
-    description += "```\n" + "\n".join(lines) + "\n```"
-    embed = discord.Embed(title="🛡️ Danh sách lệnh (toàn bộ)", color=discord.Color.green(), description=description)
-    await ctx.send(embed=embed)
+    """Hiển thị danh sách lệnh dạng embed (chia 2 embed để tránh giới hạn 25 fields)"""
+    # Embed 1: Các lệnh quản lý user & lệnh tương tác
+    embed1 = discord.Embed(title="🛡️ Danh sách lệnh (Phần 1/2)", color=discord.Color.green())
+    embed1.add_field(name="!test", value="Kiểm tra bot", inline=False)
+    embed1.add_field(name="!scan [số lượng]", value="Quét kênh xóa tin vi phạm (mặc định 100)", inline=False)
+    embed1.add_field(name="!set_log_channel #kênh", value="Đặt kênh log", inline=False)
+    embed1.add_field(name="!set_admin_role @role", value="Đặt role quản trị bot", inline=False)
+    embed1.add_field(name="!add_admin_user @user", value="Thêm user được dùng lệnh", inline=False)
+    embed1.add_field(name="!remove_admin_user @user", value="Xóa user khỏi danh sách admin", inline=False)
+    embed1.add_field(name="!list_admin_users", value="Xem danh sách user admin", inline=False)
+    embed1.add_field(name="!mute @user <thời gian> [lý do]", value="Mute (vd: 10m, 2h, 1d)", inline=False)
+    embed1.add_field(name="!unmute @user [lý do]", value="Gỡ mute", inline=False)
+    embed1.add_field(name="!kick @user [lý do]", value="Kick thành viên", inline=False)
+    embed1.add_field(name="!ban @user [lý do]", value="Ban thành viên", inline=False)
+    embed1.add_field(name="!unban <user_id> [lý do]", value="Unban bằng ID", inline=False)
+    embed1.add_field(name="!solo @user <số_lượng> <nội dung> [emoji]", value="Đấu spam (dừng bằng !stop_solo)", inline=False)
+    embed1.add_field(name="!stop_solo", value="Dừng solo trong kênh hiện tại", inline=False)
+    embed1.add_field(name="!toggle_translate on/off", value="Bật/tắt auto dịch", inline=False)
+
+    # Embed 2: Các lệnh cấu hình bảo vệ, allow, thêm từ cấm
+    embed2 = discord.Embed(title="🛡️ Danh sách lệnh (Phần 2/2)", color=discord.Color.blue())
+    embed2.add_field(name="!allow_channel #kênh", value="Cho phép kênh được spam/link (whitelist)", inline=False)
+    embed2.add_field(name="!allow_role @role", value="Cho phép role gửi link", inline=False)
+    embed2.add_field(name="!allow_badword <từ>", value="Cho phép 1 từ chửi bậy (whitelist)", inline=False)
+    embed2.add_field(name="!allow_bad_member @user", value="Cho phép thành viên chửi bậy", inline=False)
+    embed2.add_field(name="!remove_allow_badword <từ>", value="Xóa từ khỏi whitelist chửi bậy", inline=False)
+    embed2.add_field(name="!remove_allow_bad_member @user", value="Xóa member khỏi whitelist", inline=False)
+    embed2.add_field(name="!add_scam_domain <domain>", value="Thêm domain lừa đảo", inline=False)
+    embed2.add_field(name="!add_badword <từ>", value="Thêm từ chửi bậy (cấm)", inline=False)
+    embed2.add_field(name="!add_scam_image_keyword <từ>", value="Thêm từ khóa ảnh scam", inline=False)
+    embed2.add_field(name="!add_nsfw_keyword <từ>", value="Thêm từ khóa NSFW", inline=False)
+    embed2.add_field(name="!toggle_nuke on/off", value="Bật/tắt chống Nuke", inline=False)
+    embed2.add_field(name="!toggle_spam on/off", value="Bật/tắt chống spam", inline=False)
+    embed2.add_field(name="!toggle_raid on/off", value="Bật/tắt chống raid", inline=False)
+    embed2.add_field(name="!raid_mode_status", value="Xem trạng thái RAID", inline=False)
+    embed2.add_field(name="!reset_raid_mode", value="Tắt RAID mode", inline=False)
+    embed2.add_field(name="!reset_violations @user", value="Reset số lần vi phạm", inline=False)
+    embed2.add_field(name="!check_violations @user", value="Xem số lần vi phạm", inline=False)
+
+    await ctx.send(embed=embed1)
+    await ctx.send(embed=embed2)
 
 # ========== LỆNH QUÉT (SCAN) ==========
 @bot.command()
