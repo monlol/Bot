@@ -4,3 +4,4 @@ python-dotenv
 aiohttp
 asyncio
 deep-translator
+langdetect
