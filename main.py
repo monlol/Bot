@@ -9,6 +9,10 @@ from dotenv import load_dotenv
 import os
 from keep_alive import keep_alive
 from deep_translator import GoogleTranslator
+from langdetect import detect, DetectorFactory
+
+# Đảm bảo kết quả detect ổn định
+DetectorFactory.seed = 0
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -31,16 +35,14 @@ MAX_LINE_LENGTH = 20
 ANTI_NUKE = True
 ANTI_SPAM = True
 ANTI_RAID = True
-AUTO_TRANSLATE = True   # Bật/tắt auto dịch
+AUTO_TRANSLATE = True
 
 ALLOWED_ROLE_ID = None
 ALLOWED_USERS = []
 
-# Danh sách trắng cho phép chửi bậy (từ và thành viên)
-ALLOWED_BAD_WORDS = []     # Các từ được phép chửi (whitelist)
-ALLOWED_BAD_MEMBERS = []   # ID thành viên được phép chửi
+ALLOWED_BAD_WORDS = []
+ALLOWED_BAD_MEMBERS = []
 
-# Quản lý task solo
 solo_tasks = {}
 
 BAD_WORDS = ["địt","lồn","cặc","đụ","vcl","dm","đmm","cc","cac","duma","ditme","fuck","shit","bitch","đĩ","mẹ kiếp","chết tiệt","mẹ mày","nigga","nigger","nick her"]
@@ -49,7 +51,7 @@ SCAM_IMAGE_KEYWORDS = ["mrbeast","mr beast","jj","j.j","giveaway","quà tặng",
 NSFW_KEYWORDS = ["nsfw","18+","porn","sex","adult","xxx","hentai","dirty","khiêu dâm","người lớn","18plus","sexviet","vlxx","phim sex"]
 INVITE_PATTERN = re.compile(r"(?:https?://)?(?:www\.)?discord(?:app)?\.(?:com|gg)/(?:invite/)?([a-zA-Z0-9\-]+)", re.IGNORECASE)
 
-ALLOWED_CHANNELS = []      # Kênh được phép spam/link (whitelist)
+ALLOWED_CHANNELS = []
 ALLOWED_ROLES = []
 user_messages = defaultdict(list)
 user_stickers = defaultdict(list)
@@ -97,11 +99,9 @@ def count_emojis(content):
     return unicode_count + custom_count
 
 def contains_bad_words(content, author_id):
-    # Nếu author được phép chửi thì bỏ qua
     if author_id in ALLOWED_BAD_MEMBERS:
         return False
     c = content.lower()
-    # Kiểm tra từng từ trong BAD_WORDS, nếu từ đó nằm trong ALLOWED_BAD_WORDS thì bỏ qua
     for word in BAD_WORDS:
         if word in c:
             if word in ALLOWED_BAD_WORDS:
@@ -143,11 +143,21 @@ async def handle_violation(user, guild, reason):
             pass
     return False
 
-# ========== AUTO DỊCH ==========
-async def translate_text(text, src='auto', dest='vi'):
+# ========== AUTO DỊCH (dùng langdetect) ==========
+translator = GoogleTranslator(source='auto', target='vi')
+
+async def translate_text(text):
     try:
-        translated = GoogleTranslator(source=src, target=dest).translate(text)
+        loop = asyncio.get_event_loop()
+        translated = await loop.run_in_executor(None, translator.translate, text)
         return translated
+    except Exception as e:
+        print(f"Lỗi dịch: {e}")
+        return None
+
+def detect_language(text):
+    try:
+        return detect(text)
     except:
         return None
 
@@ -163,20 +173,25 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    # Auto dịch (chỉ dịch tin nhắn text, không phải lệnh)
+    # Auto dịch (chỉ trong server, có thể bật/tắt)
     if AUTO_TRANSLATE and message.content and not message.content.startswith('!'):
-        # Phát hiện ngôn ngữ và dịch sang tiếng Việt nếu không phải tiếng Việt
-        try:
-            translator = GoogleTranslator()
-            detected_lang = translator.detect(message.content)
-            if detected_lang and detected_lang != 'vi':
-                translated = await translate_text(message.content)
-                if translated and translated.lower() != message.content.lower():
-                    await message.reply(f"🌐 **Dịch sang tiếng Việt:** {translated}")
-        except:
-            pass
+        if len(message.content.strip()) > 2:
+            try:
+                lang = detect_language(message.content)
+                if lang and lang != 'vi':
+                    translated = await translate_text(message.content)
+                    if translated and translated.lower() != message.content.lower():
+                        await message.reply(f"🌐 **Dịch sang tiếng Việt:** {translated}")
+            except Exception as e:
+                print(f"Lỗi dịch: {e}")
 
-    # Miễn trừ cho admin/owner (bao gồm cả kiểm tra chửi bậy)
+    # Xử lý tin nhắn trong DM (không có guild)
+    if message.guild is None:
+        # DM: chỉ xử lý lệnh, không kiểm tra spam/chửi bậy
+        await bot.process_commands(message)
+        return
+
+    # Miễn trừ cho owner/admin/owner server
     if message.author.id == OWNER_ID or message.author.guild_permissions.administrator or message.author.id == message.guild.owner_id:
         await bot.process_commands(message)
         return
@@ -196,7 +211,7 @@ async def on_message(message):
             except:
                 pass
 
-    # Nếu kênh được allow thì bỏ qua mọi kiểm tra spam/raid/scam/chửi bậy
+    # Nếu kênh được allow thì bỏ qua mọi kiểm tra
     if ctx.channel.id in ALLOWED_CHANNELS:
         await bot.process_commands(message)
         return
@@ -230,7 +245,7 @@ async def on_message(message):
             await punish(f"Spam tin nhắn ({len(user_messages[user.id])} tin / {SPAM_WINDOW}s)")
             return
 
-    # Các kiểm tra link scam, invite, ảnh scam, NSFW (vẫn áp dụng cho mọi kênh trừ ALLOWED_CHANNELS)
+    # Các kiểm tra link scam, invite, ảnh scam, NSFW
     urls = re.findall(r"(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)", content)
     for url in urls:
         if any(scam in url for scam in SCAM_DOMAINS):
@@ -255,7 +270,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ===== CÁC SỰ KIỆN KHÁC GIỮ NGUYÊN =====
+# === Các sự kiện khác giữ nguyên ===
 @bot.event
 async def on_member_join(member):
     if not (ANTI_RAID and ANTI_NUKE):
@@ -302,8 +317,6 @@ async def test(ctx):
 
 @bot.command(aliases=['help'])
 async def dzai(ctx):
-    """Hiển thị danh sách lệnh dạng embed (chia 2 embed để tránh giới hạn 25 fields)"""
-    # Embed 1: Các lệnh quản lý user & lệnh tương tác
     embed1 = discord.Embed(title="🛡️ Danh sách lệnh (Phần 1/2)", color=discord.Color.green())
     embed1.add_field(name="!test", value="Kiểm tra bot", inline=False)
     embed1.add_field(name="!scan [số lượng]", value="Quét kênh xóa tin nhắn vi phạm", inline=False)
@@ -321,7 +334,6 @@ async def dzai(ctx):
     embed1.add_field(name="!stop_solo", value="Dừng solo", inline=False)
     embed1.add_field(name="!toggle_translate on/off", value="Bật/tắt auto dịch", inline=False)
 
-    # Embed 2: Các lệnh cấu hình bảo vệ, allow, thêm từ cấm
     embed2 = discord.Embed(title="🛡️ Danh sách lệnh (Phần 2/2)", color=discord.Color.blue())
     embed2.add_field(name="!allow_channel #kênh", value="Cho phép kênh được spam", inline=False)
     embed2.add_field(name="!allow_role @role", value="Cho phép role gửi link", inline=False)
@@ -344,38 +356,31 @@ async def dzai(ctx):
     await ctx.send(embed=embed1)
     await ctx.send(embed=embed2)
 
-# ========== LỆNH QUÉT (SCAN) ==========
+# ========== LỆNH QUÉT ==========
 @bot.command()
 async def scan(ctx, limit: int = 100):
-    """Quét kênh hiện tại, xóa tin nhắn vi phạm (chửi bậy, scam, nsfw, link mời)"""
     if not await check_admin_permission(ctx):
         return
     if limit > 1000:
         await ctx.send("❌ Chỉ có thể quét tối đa 1000 tin nhắn.")
         return
-    await ctx.send(f"🔍 Đang quét {limit} tin nhắn gần nhất trong kênh...")
+    await ctx.send(f"🔍 Đang quét {limit} tin nhắn gần nhất...")
     deleted = 0
     async for message in ctx.channel.history(limit=limit):
         if message.author == bot.user:
             continue
         content = message.content.lower()
-        # Kiểm tra các tiêu chí vi phạm
         is_violation = False
-        # 1. Chửi bậy
         if contains_bad_words(content, message.author.id):
             is_violation = True
-        # 2. Link scam
         for url in re.findall(r"(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)", content):
             if any(scam in url for scam in SCAM_DOMAINS):
                 is_violation = True
                 break
-        # 3. Link mời Discord
         if INVITE_PATTERN.search(content):
             is_violation = True
-        # 4. NSFW link
         if contains_nsfw_link(content):
             is_violation = True
-        # 5. Ảnh scam (chỉ kiểm tra caption, không thể kiểm tra ảnh cũ dễ dàng)
         for att in message.attachments:
             if att.filename.lower().endswith(('.png','.jpg','.jpeg','.gif','.webp')):
                 if contains_scam_image_keywords(content) or contains_scam_image_keywords(att.filename):
@@ -385,7 +390,7 @@ async def scan(ctx, limit: int = 100):
             try:
                 await message.delete()
                 deleted += 1
-                await asyncio.sleep(0.5)  # tránh rate limit
+                await asyncio.sleep(0.5)
             except:
                 pass
     await ctx.send(f"✅ Đã quét xong! Đã xóa {deleted} tin nhắn vi phạm.")
@@ -451,7 +456,6 @@ async def allow_channel(ctx, channel: discord.TextChannel):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def allow_badword(ctx, *, word: str):
-    """Cho phép một từ chửi bậy (không bị phạt)"""
     word_lower = word.lower()
     if word_lower in ALLOWED_BAD_WORDS:
         await ctx.send(f"ℹ️ Từ '{word}' đã có trong danh sách cho phép.")
@@ -462,7 +466,6 @@ async def allow_badword(ctx, *, word: str):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def remove_allow_badword(ctx, *, word: str):
-    """Xóa từ khỏi danh sách cho phép chửi bậy"""
     word_lower = word.lower()
     if word_lower not in ALLOWED_BAD_WORDS:
         await ctx.send(f"ℹ️ Từ '{word}' không có trong danh sách cho phép.")
@@ -473,7 +476,6 @@ async def remove_allow_badword(ctx, *, word: str):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def allow_bad_member(ctx, member: discord.Member):
-    """Cho phép thành viên được chửi bậy mà không bị phạt"""
     if member.id in ALLOWED_BAD_MEMBERS:
         await ctx.send(f"ℹ️ {member.mention} đã có trong danh sách cho phép.")
         return
@@ -483,14 +485,13 @@ async def allow_bad_member(ctx, member: discord.Member):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def remove_allow_bad_member(ctx, member: discord.Member):
-    """Xóa thành viên khỏi danh sách cho phép chửi bậy"""
     if member.id not in ALLOWED_BAD_MEMBERS:
         await ctx.send(f"ℹ️ {member.mention} không có trong danh sách cho phép.")
         return
     ALLOWED_BAD_MEMBERS.remove(member.id)
     await ctx.send(f"✅ Đã xóa {member.mention} khỏi danh sách cho phép chửi bậy.")
 
-# ========== CÁC LỆNH QUẢN TRỊ KHÁC (GIỮ NGUYÊN) ==========
+# ========== CÁC LỆNH QUẢN TRỊ ==========
 @bot.command()
 async def set_log_channel(ctx, channel: discord.TextChannel = None):
     if not await check_admin_permission(ctx): return
@@ -651,7 +652,7 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
     if amount <= 0:
         await ctx.send("❌ Số lượng phải lớn hơn 0.")
         return
-    
+
     content = content_with_emoji
     emoji = ""
     words = content_with_emoji.rsplit(' ', 1)
@@ -665,22 +666,22 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
             content = content_with_emoji
     else:
         content = content_with_emoji
-    
+
     if not content:
         content = "spam"
-    
+
     msg_content = content
     if emoji:
         msg_content += f" {emoji}"
-    
+
     if ctx.channel.id in solo_tasks and not solo_tasks[ctx.channel.id].done():
         solo_tasks[ctx.channel.id].cancel()
         await ctx.send("⏹️ Đã hủy solo cũ trong kênh này.")
         await asyncio.sleep(0.5)
-    
+
     await ctx.send(f"🎮 Bắt đầu solo {amount} lần với {target.mention}! (nội dung: {msg_content})")
     await asyncio.sleep(0.5)
-    
+
     async def spam_task():
         try:
             for i in range(amount):
@@ -698,7 +699,7 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
         finally:
             if ctx.channel.id in solo_tasks:
                 del solo_tasks[ctx.channel.id]
-    
+
     task = asyncio.create_task(spam_task())
     solo_tasks[ctx.channel.id] = task
 
