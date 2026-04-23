@@ -8,6 +8,7 @@ import asyncio
 from dotenv import load_dotenv
 import os
 from keep_alive import keep_alive
+from deep_translator import GoogleTranslator
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -30,9 +31,14 @@ MAX_LINE_LENGTH = 20
 ANTI_NUKE = True
 ANTI_SPAM = True
 ANTI_RAID = True
+AUTO_TRANSLATE = True   # Bật/tắt auto dịch
 
 ALLOWED_ROLE_ID = None
 ALLOWED_USERS = []
+
+# Danh sách trắng cho phép chửi bậy (từ và thành viên)
+ALLOWED_BAD_WORDS = []     # Các từ được phép chửi (whitelist)
+ALLOWED_BAD_MEMBERS = []   # ID thành viên được phép chửi
 
 # Quản lý task solo
 solo_tasks = {}
@@ -43,7 +49,7 @@ SCAM_IMAGE_KEYWORDS = ["mrbeast","mr beast","jj","j.j","giveaway","quà tặng",
 NSFW_KEYWORDS = ["nsfw","18+","porn","sex","adult","xxx","hentai","dirty","khiêu dâm","người lớn","18plus","sexviet","vlxx","phim sex"]
 INVITE_PATTERN = re.compile(r"(?:https?://)?(?:www\.)?discord(?:app)?\.(?:com|gg)/(?:invite/)?([a-zA-Z0-9\-]+)", re.IGNORECASE)
 
-ALLOWED_CHANNELS = []
+ALLOWED_CHANNELS = []      # Kênh được phép spam/link (whitelist)
 ALLOWED_ROLES = []
 user_messages = defaultdict(list)
 user_stickers = defaultdict(list)
@@ -52,21 +58,20 @@ RAID_MODE = False
 log_channel_id = None
 violation_count = defaultdict(int)
 
-# ========== KIỂM TRA QUYỀN ==========
-def has_admin_role():
-    async def predicate(ctx):
-        if ctx.author.id == OWNER_ID:
+# ========== HÀM KIỂM TRA QUYỀN ==========
+async def check_admin_permission(ctx):
+    if ctx.author.id == OWNER_ID:
+        return True
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+    if ctx.author.id in ALLOWED_USERS:
+        return True
+    if ALLOWED_ROLE_ID is not None:
+        role = ctx.guild.get_role(ALLOWED_ROLE_ID)
+        if role and role in ctx.author.roles:
             return True
-        if ctx.author.id == ctx.guild.owner_id:
-            return True
-        if ctx.author.id in ALLOWED_USERS:
-            return True
-        if ALLOWED_ROLE_ID is not None:
-            role = ctx.guild.get_role(ALLOWED_ROLE_ID)
-            if role and role in ctx.author.roles:
-                return True
-        return False
-    return commands.check(predicate)
+    await ctx.send("❌ Bạn không có quyền dùng lệnh này!")
+    return False
 
 # ========== HÀM HỖ TRỢ ==========
 async def log_action(guild, action, target, moderator=None, reason=None):
@@ -91,9 +96,18 @@ def count_emojis(content):
     custom_count = len(custom_pattern.findall(content))
     return unicode_count + custom_count
 
-def contains_bad_words(content):
+def contains_bad_words(content, author_id):
+    # Nếu author được phép chửi thì bỏ qua
+    if author_id in ALLOWED_BAD_MEMBERS:
+        return False
     c = content.lower()
-    return any(word in c for word in BAD_WORDS)
+    # Kiểm tra từng từ trong BAD_WORDS, nếu từ đó nằm trong ALLOWED_BAD_WORDS thì bỏ qua
+    for word in BAD_WORDS:
+        if word in c:
+            if word in ALLOWED_BAD_WORDS:
+                continue
+            return True
+    return False
 
 def count_lines(content):
     return content.count('\n') + 1 if content else 0
@@ -129,6 +143,14 @@ async def handle_violation(user, guild, reason):
             pass
     return False
 
+# ========== AUTO DỊCH ==========
+async def translate_text(text, src='auto', dest='vi'):
+    try:
+        translated = GoogleTranslator(source=src, target=dest).translate(text)
+        return translated
+    except:
+        return None
+
 # ========== SỰ KIỆN ==========
 @bot.event
 async def on_ready():
@@ -141,6 +163,20 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
+    # Auto dịch (chỉ dịch tin nhắn text, không phải lệnh)
+    if AUTO_TRANSLATE and message.content and not message.content.startswith('!'):
+        # Phát hiện ngôn ngữ và dịch sang tiếng Việt nếu không phải tiếng Việt
+        try:
+            translator = GoogleTranslator()
+            detected_lang = translator.detect(message.content)
+            if detected_lang and detected_lang != 'vi':
+                translated = await translate_text(message.content)
+                if translated and translated.lower() != message.content.lower():
+                    await message.reply(f"🌐 **Dịch sang tiếng Việt:** {translated}")
+        except:
+            pass
+
+    # Miễn trừ cho admin/owner (bao gồm cả kiểm tra chửi bậy)
     if message.author.id == OWNER_ID or message.author.guild_permissions.administrator or message.author.id == message.guild.owner_id:
         await bot.process_commands(message)
         return
@@ -160,6 +196,11 @@ async def on_message(message):
             except:
                 pass
 
+    # Nếu kênh được allow thì bỏ qua mọi kiểm tra spam/raid/scam/chửi bậy
+    if ctx.channel.id in ALLOWED_CHANNELS:
+        await bot.process_commands(message)
+        return
+
     if ANTI_SPAM:
         emoji_count = count_emojis(content)
         if emoji_count > EMOJI_SPAM_LIMIT:
@@ -174,7 +215,7 @@ async def on_message(message):
                 await punish(f"Spam sticker ({len(user_stickers[user.id])})")
                 return
 
-        if contains_bad_words(content):
+        if contains_bad_words(content, user.id):
             await punish(f"Chửi bậy: {content[:50]}")
             return
 
@@ -189,6 +230,7 @@ async def on_message(message):
             await punish(f"Spam tin nhắn ({len(user_messages[user.id])} tin / {SPAM_WINDOW}s)")
             return
 
+    # Các kiểm tra link scam, invite, ảnh scam, NSFW (vẫn áp dụng cho mọi kênh trừ ALLOWED_CHANNELS)
     urls = re.findall(r"(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)", content)
     for url in urls:
         if any(scam in url for scam in SCAM_DOMAINS):
@@ -213,6 +255,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+# ===== CÁC SỰ KIỆN KHÁC GIỮ NGUYÊN =====
 @bot.event
 async def on_member_join(member):
     if not (ANTI_RAID and ANTI_NUKE):
@@ -252,40 +295,115 @@ async def on_member_ban(guild, user):
                 pass
             break
 
-# ========== LỆNH QUẢN TRỊ ==========
+# ========== LỆNH ==========
 @bot.command()
 async def test(ctx):
     await ctx.send("🤖 Bot bảo vệ đang hoạt động!")
 
-@bot.command()
+@bot.command(aliases=['help'])
 async def dzai(ctx):
-    embed = discord.Embed(title="🛡️ Danh sách lệnh", color=discord.Color.green())
-    embed.add_field(name="!test", value="Kiểm tra bot", inline=False)
-    embed.add_field(name="!set_log_channel #kênh", value="Đặt kênh log", inline=False)
-    embed.add_field(name="!set_admin_role @role", value="Đặt role quản trị bot", inline=False)
-    embed.add_field(name="!add_admin_user @user", value="Thêm user được dùng lệnh", inline=False)
-    embed.add_field(name="!remove_admin_user @user", value="Xóa user khỏi danh sách admin", inline=False)
-    embed.add_field(name="!list_admin_users", value="Xem danh sách user admin", inline=False)
-    embed.add_field(name="!mute @user <thời gian> [lý do]", value="Mute người dùng (vd: 10m, 2h, 1d)", inline=False)
-    embed.add_field(name="!kick @user [lý do]", value="Kick người dùng", inline=False)
-    embed.add_field(name="!ban @user [lý do]", value="Ban người dùng", inline=False)
-    embed.add_field(name="!solo @user <số lượng> <nội dung> [emoji]", value="Đấu nhau (tự động ping, có thể dừng bằng !stop_solo)", inline=False)
-    embed.add_field(name="!stop_solo", value="Dừng cuộc solo trong kênh hiện tại", inline=False)
-    embed.add_field(name="!toggle_nuke on/off", value="Bật/tắt chống Nuke", inline=False)
-    embed.add_field(name="!toggle_spam on/off", value="Bật/tắt chống spam", inline=False)
-    embed.add_field(name="!toggle_raid on/off", value="Bật/tắt chống raid", inline=False)
-    embed.add_field(name="!allow_channel #kênh", value="Whitelist kênh gửi link", inline=False)
-    embed.add_field(name="!allow_role @role", value="Whitelist role gửi link", inline=False)
-    embed.add_field(name="!add_scam_domain <domain>", value="Thêm domain lừa đảo", inline=False)
-    embed.add_field(name="!add_badword <từ>", value="Thêm từ chửi bậy", inline=False)
-    embed.add_field(name="!add_scam_image_keyword <từ>", value="Thêm từ khóa ảnh scam", inline=False)
-    embed.add_field(name="!add_nsfw_keyword <từ>", value="Thêm từ khóa NSFW", inline=False)
-    embed.add_field(name="!raid_mode_status", value="Xem trạng thái RAID", inline=False)
-    embed.add_field(name="!reset_raid_mode", value="Tắt RAID mode", inline=False)
-    embed.add_field(name="!reset_violations @user", value="Reset số lần vi phạm", inline=False)
-    embed.add_field(name="!check_violations @user", value="Xem số lần vi phạm", inline=False)
+    # Tạo nội dung cho description với 2 cột song song
+    left_col = []
+    right_col = []
+    commands_list = [
+        ("!test", "Kiểm tra bot"),
+        ("!scan [số lượng]", "Quét kênh xóa tin vi phạm"),
+        ("!set_log_channel #kênh", "Đặt kênh log"),
+        ("!set_admin_role @role", "Đặt role quản trị bot"),
+        ("!add_admin_user @user", "Thêm user được dùng lệnh"),
+        ("!remove_admin_user @user", "Xóa user khỏi danh sách admin"),
+        ("!list_admin_users", "Xem danh sách user admin"),
+        ("!mute @user <thời gian>", "Mute (vd: 10m, 2h, 1d)"),
+        ("!unmute @user", "Gỡ mute"),
+        ("!kick @user", "Kick thành viên"),
+        ("!ban @user", "Ban thành viên"),
+        ("!unban <user_id>", "Unban bằng ID"),
+        ("!solo @user <sl> <nd> [emoji]", "Đấu spam (dừng bằng !stop_solo)"),
+        ("!stop_solo", "Dừng solo"),
+        ("!allow_channel #kênh", "Cho phép kênh spam/link"),
+        ("!allow_role @role", "Cho phép role gửi link"),
+        ("!allow_badword <từ>", "Cho phép từ chửi bậy"),
+        ("!allow_bad_member @user", "Cho phép member chửi bậy"),
+        ("!remove_allow_badword <từ>", "Xóa từ khỏi whitelist"),
+        ("!remove_allow_bad_member @user", "Xóa member khỏi whitelist"),
+        ("!add_scam_domain <domain>", "Thêm domain lừa đảo"),
+        ("!add_badword <từ>", "Thêm từ chửi bậy (cấm)"),
+        ("!add_scam_image_keyword <từ>", "Thêm từ khóa ảnh scam"),
+        ("!add_nsfw_keyword <từ>", "Thêm từ khóa NSFW"),
+        ("!toggle_nuke on/off", "Bật/tắt chống Nuke"),
+        ("!toggle_spam on/off", "Bật/tắt chống spam"),
+        ("!toggle_raid on/off", "Bật/tắt chống raid"),
+        ("!toggle_translate on/off", "Bật/tắt auto dịch"),
+        ("!raid_mode_status", "Xem trạng thái RAID"),
+        ("!reset_raid_mode", "Tắt RAID mode"),
+        ("!reset_violations @user", "Reset số lần vi phạm"),
+        ("!check_violations @user", "Xem số lần vi phạm"),
+    ]
+    # Chia làm 2 cột
+    half = (len(commands_list) + 1) // 2
+    for cmd, desc in commands_list[:half]:
+        left_col.append(f"**{cmd}** – {desc}")
+    for cmd, desc in commands_list[half:]:
+        right_col.append(f"**{cmd}** – {desc}")
+    # Tạo description với 2 cột dạng markdown table đơn giản
+    description = "```\n" + "Chú thích: <thời gian> = 10m, 2h, 1d; <sl> = số lượng; <nd> = nội dung\n" + "```\n"
+    max_len = max(len(line) for line in left_col + right_col) if left_col else 0
+    lines = []
+    for i in range(max(len(left_col), len(right_col))):
+        left = left_col[i] if i < len(left_col) else ""
+        right = right_col[i] if i < len(right_col) else ""
+        lines.append(f"{left:<{max_len}}   {right}")
+    description += "```\n" + "\n".join(lines) + "\n```"
+    embed = discord.Embed(title="🛡️ Danh sách lệnh (toàn bộ)", color=discord.Color.green(), description=description)
     await ctx.send(embed=embed)
 
+# ========== LỆNH QUÉT (SCAN) ==========
+@bot.command()
+async def scan(ctx, limit: int = 100):
+    """Quét kênh hiện tại, xóa tin nhắn vi phạm (chửi bậy, scam, nsfw, link mời)"""
+    if not await check_admin_permission(ctx):
+        return
+    if limit > 1000:
+        await ctx.send("❌ Chỉ có thể quét tối đa 1000 tin nhắn.")
+        return
+    await ctx.send(f"🔍 Đang quét {limit} tin nhắn gần nhất trong kênh...")
+    deleted = 0
+    async for message in ctx.channel.history(limit=limit):
+        if message.author == bot.user:
+            continue
+        content = message.content.lower()
+        # Kiểm tra các tiêu chí vi phạm
+        is_violation = False
+        # 1. Chửi bậy
+        if contains_bad_words(content, message.author.id):
+            is_violation = True
+        # 2. Link scam
+        for url in re.findall(r"(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)", content):
+            if any(scam in url for scam in SCAM_DOMAINS):
+                is_violation = True
+                break
+        # 3. Link mời Discord
+        if INVITE_PATTERN.search(content):
+            is_violation = True
+        # 4. NSFW link
+        if contains_nsfw_link(content):
+            is_violation = True
+        # 5. Ảnh scam (chỉ kiểm tra caption, không thể kiểm tra ảnh cũ dễ dàng)
+        for att in message.attachments:
+            if att.filename.lower().endswith(('.png','.jpg','.jpeg','.gif','.webp')):
+                if contains_scam_image_keywords(content) or contains_scam_image_keywords(att.filename):
+                    is_violation = True
+                    break
+        if is_violation:
+            try:
+                await message.delete()
+                deleted += 1
+                await asyncio.sleep(0.5)  # tránh rate limit
+            except:
+                pass
+    await ctx.send(f"✅ Đã quét xong! Đã xóa {deleted} tin nhắn vi phạm.")
+
+# ========== LỆNH OWNER ==========
 @bot.command()
 @commands.is_owner()
 async def set_admin_role(ctx, role: discord.Role):
@@ -327,8 +445,68 @@ async def list_admin_users(ctx):
     await ctx.send(f"📋 **Admin users:** {', '.join(mentions)}")
 
 @bot.command()
-@has_admin_role()
+@commands.is_owner()
+async def toggle_translate(ctx, status: str = None):
+    global AUTO_TRANSLATE
+    if status is None:
+        AUTO_TRANSLATE = not AUTO_TRANSLATE
+    else:
+        AUTO_TRANSLATE = status.lower() == "on"
+    await ctx.send(f"🌐 Auto dịch: {'BẬT' if AUTO_TRANSLATE else 'TẮT'}")
+
+# ========== LỆNH ALLOW (WHITELIST) ==========
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def allow_channel(ctx, channel: discord.TextChannel):
+    ALLOWED_CHANNELS.append(channel.id)
+    await ctx.send(f"✅ Cho phép spam/link trong {channel.mention}")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def allow_badword(ctx, *, word: str):
+    """Cho phép một từ chửi bậy (không bị phạt)"""
+    word_lower = word.lower()
+    if word_lower in ALLOWED_BAD_WORDS:
+        await ctx.send(f"ℹ️ Từ '{word}' đã có trong danh sách cho phép.")
+        return
+    ALLOWED_BAD_WORDS.append(word_lower)
+    await ctx.send(f"✅ Đã cho phép từ '{word}'. Người dùng có thể chửi từ này mà không bị phạt.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def remove_allow_badword(ctx, *, word: str):
+    """Xóa từ khỏi danh sách cho phép chửi bậy"""
+    word_lower = word.lower()
+    if word_lower not in ALLOWED_BAD_WORDS:
+        await ctx.send(f"ℹ️ Từ '{word}' không có trong danh sách cho phép.")
+        return
+    ALLOWED_BAD_WORDS.remove(word_lower)
+    await ctx.send(f"✅ Đã xóa từ '{word}' khỏi danh sách cho phép.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def allow_bad_member(ctx, member: discord.Member):
+    """Cho phép thành viên được chửi bậy mà không bị phạt"""
+    if member.id in ALLOWED_BAD_MEMBERS:
+        await ctx.send(f"ℹ️ {member.mention} đã có trong danh sách cho phép.")
+        return
+    ALLOWED_BAD_MEMBERS.append(member.id)
+    await ctx.send(f"✅ Đã cho phép {member.mention} chửi bậy mà không bị phạt.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def remove_allow_bad_member(ctx, member: discord.Member):
+    """Xóa thành viên khỏi danh sách cho phép chửi bậy"""
+    if member.id not in ALLOWED_BAD_MEMBERS:
+        await ctx.send(f"ℹ️ {member.mention} không có trong danh sách cho phép.")
+        return
+    ALLOWED_BAD_MEMBERS.remove(member.id)
+    await ctx.send(f"✅ Đã xóa {member.mention} khỏi danh sách cho phép chửi bậy.")
+
+# ========== CÁC LỆNH QUẢN TRỊ KHÁC (GIỮ NGUYÊN) ==========
+@bot.command()
 async def set_log_channel(ctx, channel: discord.TextChannel = None):
+    if not await check_admin_permission(ctx): return
     global log_channel_id
     if channel is None:
         channel = ctx.channel
@@ -336,8 +514,8 @@ async def set_log_channel(ctx, channel: discord.TextChannel = None):
     await ctx.send(f"✅ Kênh log: {channel.mention}")
 
 @bot.command()
-@has_admin_role()
 async def toggle_nuke(ctx, status: str = None):
+    if not await check_admin_permission(ctx): return
     global ANTI_NUKE
     if status is None:
         ANTI_NUKE = not ANTI_NUKE
@@ -346,8 +524,8 @@ async def toggle_nuke(ctx, status: str = None):
     await ctx.send(f"🛡️ Anti-Nuke: {'BẬT' if ANTI_NUKE else 'TẮT'}")
 
 @bot.command()
-@has_admin_role()
 async def toggle_spam(ctx, status: str = None):
+    if not await check_admin_permission(ctx): return
     global ANTI_SPAM
     if status is None:
         ANTI_SPAM = not ANTI_SPAM
@@ -356,8 +534,8 @@ async def toggle_spam(ctx, status: str = None):
     await ctx.send(f"🛡️ Anti-Spam: {'BẬT' if ANTI_SPAM else 'TẮT'}")
 
 @bot.command()
-@has_admin_role()
 async def toggle_raid(ctx, status: str = None):
+    if not await check_admin_permission(ctx): return
     global ANTI_RAID
     if status is None:
         ANTI_RAID = not ANTI_RAID
@@ -366,57 +544,51 @@ async def toggle_raid(ctx, status: str = None):
     await ctx.send(f"🛡️ Anti-Raid: {'BẬT' if ANTI_RAID else 'TẮT'}")
 
 @bot.command()
-@has_admin_role()
-async def allow_channel(ctx, channel: discord.TextChannel):
-    ALLOWED_CHANNELS.append(channel.id)
-    await ctx.send(f"✅ Cho phép link trong {channel.mention}")
-
-@bot.command()
-@has_admin_role()
 async def allow_role(ctx, role: discord.Role):
+    if not await check_admin_permission(ctx): return
     ALLOWED_ROLES.append(role.id)
     await ctx.send(f"✅ Cho phép link với role {role.name}")
 
 @bot.command()
-@has_admin_role()
 async def add_scam_domain(ctx, domain: str):
+    if not await check_admin_permission(ctx): return
     SCAM_DOMAINS.append(domain.lower())
     await ctx.send(f"✅ Đã thêm domain {domain}")
 
 @bot.command()
-@has_admin_role()
 async def add_badword(ctx, *, word: str):
+    if not await check_admin_permission(ctx): return
     BAD_WORDS.append(word.lower())
     await ctx.send(f"✅ Đã thêm từ cấm {word}")
 
 @bot.command()
-@has_admin_role()
 async def add_scam_image_keyword(ctx, *, keyword: str):
+    if not await check_admin_permission(ctx): return
     SCAM_IMAGE_KEYWORDS.append(keyword.lower())
     await ctx.send(f"✅ Thêm từ khóa ảnh scam: {keyword}")
 
 @bot.command()
-@has_admin_role()
 async def add_nsfw_keyword(ctx, *, keyword: str):
+    if not await check_admin_permission(ctx): return
     NSFW_KEYWORDS.append(keyword.lower())
     await ctx.send(f"✅ Thêm từ khóa NSFW: {keyword}")
 
 @bot.command()
-@has_admin_role()
 async def raid_mode_status(ctx):
+    if not await check_admin_permission(ctx): return
     await ctx.send(f"🚨 RAID MODE: {'BẬT' if RAID_MODE else 'TẮT'}")
 
 @bot.command()
-@has_admin_role()
 async def reset_raid_mode(ctx):
+    if not await check_admin_permission(ctx): return
     global RAID_MODE, join_times
     RAID_MODE = False
     join_times.clear()
     await ctx.send("✅ Đã tắt RAID mode và reset bộ đếm.")
 
 @bot.command()
-@has_admin_role()
 async def reset_violations(ctx, member: discord.Member):
+    if not await check_admin_permission(ctx): return
     if member.id in violation_count:
         del violation_count[member.id]
         await ctx.send(f"✅ Reset vi phạm cho {member.mention}")
@@ -424,17 +596,17 @@ async def reset_violations(ctx, member: discord.Member):
         await ctx.send(f"ℹ️ {member.mention} chưa vi phạm lần nào.")
 
 @bot.command()
-@has_admin_role()
 async def check_violations(ctx, member: discord.Member = None):
+    if not await check_admin_permission(ctx): return
     if member is None:
         member = ctx.author
     count = violation_count.get(member.id, 0)
     await ctx.send(f"📊 {member.mention} có {count}/5 lần vi phạm.")
 
-# ========== LỆNH MUTE, KICK, BAN ==========
+# ========== LỆNH MUTE, KICK, BAN, UNMUTE, UNBAN ==========
 @bot.command()
-@has_admin_role()
 async def mute(ctx, member: discord.Member, duration: str = "1h", *, reason: str = "Không có lý do"):
+    if not await check_admin_permission(ctx): return
     units = {"m": 60, "h": 3600, "d": 86400}
     try:
         if duration[-1] in units:
@@ -450,24 +622,42 @@ async def mute(ctx, member: discord.Member, duration: str = "1h", *, reason: str
     await ctx.send(f"🔇 Đã mute {member.mention} trong **{duration}** (lý do: {reason})")
 
 @bot.command()
-@has_admin_role()
+async def unmute(ctx, member: discord.Member, *, reason: str = "Không có lý do"):
+    if not await check_admin_permission(ctx): return
+    await member.timeout(None, reason=reason)
+    await ctx.send(f"🔊 Đã unmute {member.mention} (lý do: {reason})")
+
+@bot.command()
 async def kick(ctx, member: discord.Member, *, reason: str = "Không có lý do"):
+    if not await check_admin_permission(ctx): return
     await member.kick(reason=reason)
     await ctx.send(f"👢 Đã kick {member.mention} (lý do: {reason})")
 
 @bot.command()
-@has_admin_role()
 async def ban(ctx, member: discord.Member, *, reason: str = "Không có lý do"):
+    if not await check_admin_permission(ctx): return
     await member.ban(reason=reason)
     await ctx.send(f"🔨 Đã ban {member.mention} (lý do: {reason})")
 
-# ========== LỆNH SOLO MỚI (tự động ping, không cần ping flag) ==========
+@bot.command()
+async def unban(ctx, user_id: int, *, reason: str = "Không có lý do"):
+    if not await check_admin_permission(ctx): return
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user, reason=reason)
+        await ctx.send(f"✅ Đã unban {user.mention} (ID: {user_id}) với lý do: {reason}")
+    except discord.NotFound:
+        await ctx.send(f"❌ Không tìm thấy user có ID {user_id} hoặc user chưa bị ban.")
+    except discord.Forbidden:
+        await ctx.send("❌ Bot không có quyền unban.")
+    except Exception as e:
+        await ctx.send(f"❌ Lỗi: {e}")
+
+# ========== LỆNH SOLO ==========
 @bot.command()
 async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: str = ""):
-    """Đấu nhau bằng spam. Cú pháp: !solo @user <số lượng> <nội dung> [emoji]
-       Ví dụ: !solo @dzai 10 chết đi 😈
-       Nội dung có thể chứa dấu cách. Tự động ping người bị solo."""
-    
+    if not await check_admin_permission(ctx):
+        return
     if amount > 9999:
         await ctx.send("❌ Số lượng không được vượt quá 9999.")
         return
@@ -475,7 +665,6 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
         await ctx.send("❌ Số lượng phải lớn hơn 0.")
         return
     
-    # Tách emoji nếu có (từ cuối cùng là emoji)
     content = content_with_emoji
     emoji = ""
     words = content_with_emoji.rsplit(' ', 1)
@@ -497,15 +686,13 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
     if emoji:
         msg_content += f" {emoji}"
     
-    # Hủy solo cũ trong kênh
     if ctx.channel.id in solo_tasks and not solo_tasks[ctx.channel.id].done():
         solo_tasks[ctx.channel.id].cancel()
         await ctx.send("⏹️ Đã hủy solo cũ trong kênh này.")
         await asyncio.sleep(0.5)
     
-    # Gửi thông báo bắt đầu TRƯỚC
     await ctx.send(f"🎮 Bắt đầu solo {amount} lần với {target.mention}! (nội dung: {msg_content})")
-    await asyncio.sleep(0.5)  # Đảm bảo thông báo hiện trước khi spam
+    await asyncio.sleep(0.5)
     
     async def spam_task():
         try:
@@ -530,7 +717,6 @@ async def solo(ctx, target: discord.Member, amount: int, *, content_with_emoji: 
 
 @bot.command()
 async def stop_solo(ctx):
-    """Dừng cuộc solo đang diễn ra trong kênh hiện tại."""
     if ctx.channel.id in solo_tasks and not solo_tasks[ctx.channel.id].done():
         solo_tasks[ctx.channel.id].cancel()
         await ctx.send("⏹️ Đã yêu cầu dừng solo. Vui lòng chờ một lát...")
