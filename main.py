@@ -5,6 +5,8 @@ from collections import defaultdict
 import re
 import time
 import asyncio
+import hashlib
+import aiohttp
 from dotenv import load_dotenv
 import os
 from keep_alive import keep_alive
@@ -19,7 +21,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ========== CẤU HÌNH TOÀN CỤC ==========
-OWNER_ID = 1075422580833529879
+OWNER_ID = 1075422580833529879   # 👈 THAY BẰNG ID CỦA BẠN
 
 # Ngưỡng mặc định
 SPAM_THRESHOLD = 5
@@ -35,13 +37,17 @@ MAX_LINE_LENGTH = 50
 MEDIA_LIMIT = 5
 MEDIA_WINDOW = 10
 
+# Danh sách đen nội dung
 BAD_WORDS = ["địt","lồn","cặc","đụ","vcl","dm","đmm","cc","cac","duma","ditme","fuck","shit","bitch","đĩ","mẹ kiếp","chết tiệt","mẹ mày","nigga","nigger","nick her"]
 SCAM_DOMAINS = ["bit.ly","tinyurl.com","rebrand.ly","discord.gift","steamcommmunity.com","nitro-steam.com","free-discord-nitro.com","trúng thưởng","quà tặng","free nitro","giveaway","mrbeast","beast games"]
 SCAM_IMAGE_KEYWORDS = ["mrbeast","mr beast","jj","j.j","giveaway","quà tặng","free nitro","free steam","free gift","trúng thưởng","nhận quà","100% free"]
 NSFW_KEYWORDS = ["nsfw","18+","porn","sex","adult","xxx","hentai","dirty","khiêu dâm","người lớn","18plus","sexviet","vlxx","phim sex"]
 INVITE_PATTERN = re.compile(r"(?:https?://)?(?:www\.)?discord(?:app)?\.(?:com|gg)/(?:invite/)?([a-zA-Z0-9\-]+)", re.IGNORECASE)
 
-# Cấu hình cho từng server (key = guild.id)
+# ========== DANH SÁCH HASH ẢNH SCAM (TOÀN CẦU) ==========
+BLACKLISTED_IMAGE_HASHES = set()
+
+# ========== CẤU HÌNH CHO TỪNG SERVER ==========
 guild_config = defaultdict(lambda: {
     "ANTI_NUKE": True,
     "ANTI_SPAM": True,
@@ -58,12 +64,12 @@ guild_config = defaultdict(lambda: {
     "join_times": [],
     "user_messages": defaultdict(list),
     "user_stickers": defaultdict(list),
-    "user_media": defaultdict(list),  # lưu thời gian gửi media
+    "user_media": defaultdict(list),
     "violation_count": defaultdict(int),
-    "blacklist": []                   # danh sách user bị giám sát đặc biệt
+    "blacklist": []
 })
 
-# Quản lý solo task (toàn cục theo channel)
+# Quản lý solo task
 solo_tasks = {}
 
 # ========== HÀM KIỂM TRA QUYỀN ==========
@@ -123,13 +129,10 @@ def count_lines(content):
     return content.count('\n') + 1 if content else 0
 
 def contains_scam(content):
-    """Phát hiện scam từ nội dung và domain"""
     c = content.lower()
-    # 1. Domain scam
     for domain in SCAM_DOMAINS:
         if domain in c:
             return True
-    # 2. Từ khóa scam ảnh
     for kw in SCAM_IMAGE_KEYWORDS:
         if kw in c:
             return True
@@ -145,7 +148,6 @@ def contains_nsfw(content):
     return False
 
 async def is_allowed_link(ctx, content):
-    """Cho phép link trong kênh whitelist? (chỉ áp dụng cho invite, scam vẫn bị chặn)"""
     gcfg = guild_config[ctx.guild.id]
     if ctx.channel.id in gcfg["ALLOWED_CHANNELS"]:
         return True
@@ -166,7 +168,6 @@ async def handle_violation(user, guild, reason, is_blacklist=False):
             except:
                 pass
     else:
-        # blacklist: mỗi lần vi phạm đều mute + đếm (nếu muốn ban sau 5 lần cũng được)
         gcfg["violation_count"][user.id] += 1
         current = gcfg["violation_count"][user.id]
         if current >= 5:
@@ -183,7 +184,7 @@ async def handle_violation(user, guild, reason, is_blacklist=False):
                 pass
     return False
 
-# ========== AUTO DỊCH (CHỈ TRONG KÊNH ĐƯỢC CẤU HÌNH) ==========
+# ========== AUTO DỊCH ==========
 translator = GoogleTranslator(source='auto', target='vi')
 async def translate_text(text):
     try:
@@ -199,6 +200,20 @@ def detect_language(text):
         return detect(text)
     except:
         return None
+
+# ========== HÀM TẢI ẢNH VÀ TÍNH HASH ==========
+async def download_image(url):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+    except:
+        pass
+    return None
+
+def compute_md5(data):
+    return hashlib.md5(data).hexdigest()
 
 # ========== SỰ KIỆN ==========
 @bot.event
@@ -219,9 +234,8 @@ async def on_message(message):
 
     gcfg = guild_config[message.guild.id]
 
-    # ========== AUTO DỊCH CHỈ TRONG KÊNH CHO PHÉP ==========
+    # AUTO DỊCH (CHỈ TRONG KÊNH ĐƯỢC CẤU HÌNH)
     if message.content and not message.content.startswith('!'):
-        # Kiểm tra xem kênh hiện tại có trong danh sách dịch không
         if message.channel.id in gcfg["TRANSLATE_CHANNELS"]:
             if len(message.content.strip()) > 2:
                 try:
@@ -233,7 +247,7 @@ async def on_message(message):
                 except Exception as e:
                     print(f"Lỗi dịch: {e}")
 
-    # ========== MIỄN TRỪ ADMIN/OWNER ==========
+    # MIỄN TRỪ ADMIN/OWNER
     if message.author.id == OWNER_ID or message.author.guild_permissions.administrator or message.author.id == message.guild.owner_id:
         await bot.process_commands(message)
         return
@@ -243,7 +257,6 @@ async def on_message(message):
     user = message.author
     guild = message.guild
 
-    # ========== PUNISH FUNCTION ==========
     async def punish(violation_reason, mute_hours=1, is_blacklist=False):
         await message.delete()
         banned = await handle_violation(user, guild, violation_reason, is_blacklist=is_blacklist)
@@ -254,47 +267,54 @@ async def on_message(message):
             except:
                 pass
 
-    # ========== ANTI SCAM (LUÔN CHẶN) ==========
+    # ANTI IMAGE HASH (chặn ảnh theo hash)
+    if message.attachments:
+        for att in message.attachments:
+            if att.filename.lower().endswith(('.png','.jpg','.jpeg','.gif','.webp')):
+                image_data = await att.read()
+                img_hash = compute_md5(image_data)
+                if img_hash in BLACKLISTED_IMAGE_HASHES:
+                    await punish(f"Gửi ảnh scam trong danh sách đen: {att.filename}")
+                    return
+
+    # ANTI SCAM (LUÔN CHẶN)
     if contains_scam(content):
         await punish(f"Scam: {content[:100]}")
         return
 
-    # ========== ANTI NSFW ==========
+    # ANTI NSFW
     if contains_nsfw(content):
         await punish(f"NSFW: {content[:100]}")
         return
 
-    # ========== ANTI INVITE (chặn link mời server khác) ==========
+    # ANTI INVITE
     invite_match = INVITE_PATTERN.search(content)
     if invite_match and not await is_allowed_link(ctx, content):
         await punish("Gửi link mời Discord không được phép")
         return
 
-    # ========== ANTI PING @everyone / @here ==========
+    # ANTI PING @everyone/@here
     if '@everyone' in content or '@here' in content:
         await punish("Ping @everyone/@here bị cấm", mute_hours=2)
         return
 
-    # ========== KIỂM TRA BLACKLIST ==========
+    # KIỂM TRA BLACKLIST
     if user.id in gcfg["blacklist"]:
         await punish(f"Blacklist: {content[:50]}", is_blacklist=True)
         return
 
-    # ========== KÊNH ĐƯỢC ALLOW (miễn spam) ==========
+    # KÊNH ĐƯỢC ALLOW (miễn spam)
     if ctx.channel.id in gcfg["ALLOWED_CHANNELS"]:
-        # Chỉ bỏ qua anti-spam, vẫn kiểm tra scam, nsfw, invite
         await bot.process_commands(message)
         return
 
-    # ========== ANTI SPAM (tin nhắn, emoji, sticker, media) ==========
+    # ANTI SPAM
     if gcfg["ANTI_SPAM"]:
-        # 1. Spam emoji
         emoji_count = count_emojis(content)
         if emoji_count > EMOJI_SPAM_LIMIT:
             await punish(f"Spam emoji ({emoji_count})")
             return
 
-        # 2. Spam sticker
         if message.stickers:
             now = time.time()
             gcfg["user_stickers"][user.id].append(now)
@@ -303,7 +323,6 @@ async def on_message(message):
                 await punish(f"Spam sticker ({len(gcfg['user_stickers'][user.id])})")
                 return
 
-        # 3. Spam ảnh, video, gif (media)
         if message.attachments or message.embeds:
             now = time.time()
             gcfg["user_media"][user.id].append(now)
@@ -312,17 +331,14 @@ async def on_message(message):
                 await punish(f"Spam media (ảnh/video/gif) {len(gcfg['user_media'][user.id])} lần")
                 return
 
-        # 4. Chửi bậy
         if contains_bad_words(content, user.id, guild.id):
             await punish(f"Chửi bậy: {content[:50]}")
             return
 
-        # 5. Tin nhắn quá dài
         if count_lines(content) > MAX_LINE_LENGTH:
             await punish(f"Tin nhắn dài {count_lines(content)} dòng")
             return
 
-        # 6. Spam tần suất
         now = time.time()
         gcfg["user_messages"][user.id].append(now)
         gcfg["user_messages"][user.id] = [t for t in gcfg["user_messages"][user.id] if now - t < SPAM_WINDOW]
@@ -384,7 +400,7 @@ async def test(ctx):
 async def dzai(ctx):
     embed1 = discord.Embed(title="🛡️ Danh sách lệnh (1/2)", color=discord.Color.green())
     embed1.add_field(name="!test", value="Kiểm tra bot", inline=False)
-    embed1.add_field(name="!scan [số lượng]", value="Quét kênh xóa tin nhắn vi phạm", inline=False)
+    embed1.add_field(name="!scan [số lượng]", value="Quét kênh xóa tin nhắn vi phạm (mặc định 9999)", inline=False)
     embed1.add_field(name="!clear @user #kênh1 #kênh2 ...", value="Xóa toàn bộ tin nhắn của user trong các kênh", inline=False)
     embed1.add_field(name="!set_log_channel #kênh", value="Đặt kênh log", inline=False)
     embed1.add_field(name="!set_admin_role @role", value="Đặt role quản trị bot", inline=False)
@@ -393,34 +409,36 @@ async def dzai(ctx):
     embed1.add_field(name="!list_admin_users", value="Xem danh sách user admin", inline=False)
     embed1.add_field(name="!blacklist add @user", value="Thêm user vào danh sách đen", inline=False)
     embed1.add_field(name="!blacklist remove @user", value="Xóa user khỏi blacklist", inline=False)
-    embed1.add_field(name="!mute @user <thời gian> [lý do]", value="Mute user", inline=False)
+    embed1.add_field(name="!mute @user <thời gian> [lý do]", value="Mute user (vd: 10m, 2h, 1d)", inline=False)
     embed1.add_field(name="!unmute @user", value="Gỡ mute", inline=False)
     embed1.add_field(name="!kick @user", value="Kick", inline=False)
     embed1.add_field(name="!ban @user", value="Ban", inline=False)
-    embed1.add_field(name="!unban <user_id>", value="Unban", inline=False)
-    embed1.add_field(name="!solo @user <sl> <nội dung> [delay] [emoji]", value="Đấu spam", inline=False)
+    embed1.add_field(name="!unban <user_id>", value="Unban bằng ID", inline=False)
+    embed1.add_field(name="!solo @user <sl> <nội dung> [delay=0.5] [emoji]", value="Đấu spam (delay tùy chọn)", inline=False)
     embed1.add_field(name="!stop_solo", value="Dừng solo", inline=False)
+    await ctx.send(embed=embed1)
 
     embed2 = discord.Embed(title="🛡️ Danh sách lệnh (2/2)", color=discord.Color.blue())
-    embed2.add_field(name="!allow_channel #kênh", value="Miễn anti spam", inline=False)
-    embed2.add_field(name="!translate_channel #kênh", value="Chỉ dịch trong kênh", inline=False)
-    embed2.add_field(name="!remove_translate_channel #kênh", value="Xóa auto dịch trong kênh", inline=False)
+    embed2.add_field(name="!allow_channel #kênh", value="Cho phép spam trong kênh (vẫn chặn scam/NSFW)", inline=False)
+    embed2.add_field(name="!translate_channel #kênh", value="Bật auto dịch trong kênh", inline=False)
+    embed2.add_field(name="!remove_translate_channel #kênh", value="Tắt auto dịch", inline=False)
     embed2.add_field(name="!allow_role @role", value="Cho phép role gửi link invite", inline=False)
-    embed2.add_field(name="!allow_badword <từ>", value="Cho phép từ được chửi bậy", inline=False)
-    embed2.add_field(name="!allow_bad_member @user", value="Cho phép user đươc chửi bậy", inline=False)
-    embed2.add_field(name="!add_scam_domain <domain>", value="Thêm domain lừa đảo", inline=False)
-    embed2.add_field(name="!add_badword <từ>", value="Thêm từ cấm", inline=False)
+    embed2.add_field(name="!allow_badword <từ>", value="Cho phép từ chửi bậy (whitelist)", inline=False)
+    embed2.add_field(name="!allow_bad_member @user", value="Cho phép user chửi bậy", inline=False)
+    embed2.add_field(name="!add_scam_domain <domain>", value="Thêm domain lừa đảo (toàn cầu)", inline=False)
+    embed2.add_field(name="!add_badword <từ>", value="Thêm từ cấm (toàn cầu)", inline=False)
     embed2.add_field(name="!add_scam_image_keyword <từ>", value="Thêm từ khóa scam ảnh", inline=False)
     embed2.add_field(name="!add_nsfw_keyword <từ>", value="Thêm từ khóa NSFW", inline=False)
-    embed2.add_field(name="!toggle_nuke on/off", value="Bật/tắt anti-nuke", inline=False)
-    embed2.add_field(name="!toggle_spam on/off", value="Bật/tắt anti-spam", inline=False)
-    embed2.add_field(name="!toggle_raid on/off", value="Bật/tắt anti-raid", inline=False)
+    embed2.add_field(name="!anti_image [link] (kèm file)", value="Thêm ảnh scam vào blacklist bằng hash", inline=False)
+    embed2.add_field(name="!remove_anti_image <hash_prefix>", value="Xóa ảnh khỏi blacklist (10 ký tự đầu hash)", inline=False)
+    embed2.add_field(name="!list_anti_image", value="Xem danh sách hash ảnh bị chặn", inline=False)
+    embed2.add_field(name="!toggle_nuke on/off", value="Bật/tắt anti-nuke (server này)", inline=False)
+    embed2.add_field(name="!toggle_spam on/off", value="Bật/tắt anti-spam (server này)", inline=False)
+    embed2.add_field(name="!toggle_raid on/off", value="Bật/tắt anti-raid (server này)", inline=False)
     embed2.add_field(name="!raid_mode_status", value="Trạng thái RAID", inline=False)
     embed2.add_field(name="!reset_raid_mode", value="Tắt RAID mode", inline=False)
     embed2.add_field(name="!reset_violations @user", value="Reset số lần vi phạm", inline=False)
     embed2.add_field(name="!check_violations @user", value="Xem số lần vi phạm", inline=False)
-
-    await ctx.send(embed=embed1)
     await ctx.send(embed=embed2)
 
 # ========== LỆNH QUÉT ==========
@@ -458,7 +476,6 @@ async def scan(ctx, limit: int = 9999):
 # ========== LỆNH CLEAR ==========
 @bot.command()
 async def clear(ctx, member: discord.Member, *channels: discord.TextChannel):
-    """Xóa tất cả tin nhắn của member trong các kênh chỉ định"""
     if not await check_admin_permission(ctx):
         return
     if not channels:
@@ -522,7 +539,7 @@ async def remove_translate_channel(ctx, channel: discord.TextChannel):
     gcfg["TRANSLATE_CHANNELS"].remove(channel.id)
     await ctx.send(f"✅ Đã tắt auto dịch trong {channel.mention}.")
 
-# ========== LỆNH ALLOW CHANNEL (CHỈ MIỄN SPAM) ==========
+# ========== LỆNH ALLOW CHANNEL ==========
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def allow_channel(ctx, channel: discord.TextChannel):
@@ -531,9 +548,56 @@ async def allow_channel(ctx, channel: discord.TextChannel):
         await ctx.send(f"ℹ️ {channel.mention} đã được miễn anti spam.")
         return
     gcfg["ALLOWED_CHANNELS"].append(channel.id)
-    await ctx.send(f"✅ Cho phép spam trong {channel.mention}.")
+    await ctx.send(f"✅ Cho phép spam trong {channel.mention} (vẫn chặn scam/NSFW/invite).")
 
-# ========== CÁC LỆNH CẤU HÌNH KHÁC (RIÊNG SERVER) ==========
+# ========== LỆNH ANTI IMAGE HASH ==========
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def anti_image(ctx, url: str = None):
+    if ctx.message.attachments:
+        attachment = ctx.message.attachments[0]
+        if any(attachment.filename.lower().endswith(ext) for ext in ('.png','.jpg','.jpeg','.gif','.webp')):
+            image_data = await attachment.read()
+        else:
+            await ctx.send("❌ File đính kèm không phải ảnh.")
+            return
+    elif url:
+        image_data = await download_image(url)
+        if not image_data:
+            await ctx.send("❌ Không thể tải ảnh từ URL. Vui lòng kiểm tra link.")
+            return
+    else:
+        await ctx.send("❌ Vui lòng upload file ảnh hoặc cung cấp link ảnh.")
+        return
+    img_hash = compute_md5(image_data)
+    BLACKLISTED_IMAGE_HASHES.add(img_hash)
+    await ctx.send(f"✅ Đã thêm ảnh vào danh sách đen. Hash: `{img_hash[:10]}...`")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def remove_anti_image(ctx, hash_prefix: str):
+    found = None
+    for h in BLACKLISTED_IMAGE_HASHES:
+        if h.startswith(hash_prefix):
+            found = h
+            break
+    if found:
+        BLACKLISTED_IMAGE_HASHES.remove(found)
+        await ctx.send(f"✅ Đã xóa ảnh có hash `{found[:10]}...`")
+    else:
+        await ctx.send("❌ Không tìm thấy hash tương ứng.")
+
+@bot.command()
+async def list_anti_image(ctx):
+    if not await check_admin_permission(ctx):
+        return
+    if not BLACKLISTED_IMAGE_HASHES:
+        await ctx.send("📃 Danh sách ảnh đen trống.")
+        return
+    lines = [f"- `{h[:10]}...`" for h in BLACKLISTED_IMAGE_HASHES][:20]
+    await ctx.send("📋 **Danh sách hash ảnh bị chặn:**\n" + "\n".join(lines))
+
+# ========== CÁC LỆNH CẤU HÌNH KHÁC ==========
 @bot.command()
 @commands.is_owner()
 async def set_admin_role(ctx, role: discord.Role):
@@ -773,9 +837,9 @@ async def unban(ctx, user_id: int, *, reason: str = "Không có lý do"):
     except Exception as e:
         await ctx.send(f"❌ Lỗi: {e}")
 
-# ========== LỆNH SOLO (CÓ DELAY) ==========
+# ========== LỆNH SOLO (CÓ DELAY TÙY CHỌN) ==========
 @bot.command()
-async def solo(ctx, target: discord.Member, amount: int, delay: float = 0.5, *, content_with_emoji: str = ""):
+async def solo(ctx, target: discord.Member, amount: int, *, content_with_options: str = ""):
     if not await check_admin_permission(ctx):
         return
     if amount > 9999:
@@ -784,15 +848,27 @@ async def solo(ctx, target: discord.Member, amount: int, delay: float = 0.5, *, 
     if amount <= 0:
         await ctx.send("❌ Số lượng phải lớn hơn 0.")
         return
-    if delay < 0:
-        delay = 0
 
-    # Tách emoji nếu có (từ cuối)
-    words = content_with_emoji.rsplit(' ', 1)
-    if len(words) == 2 and re.search(r'[\U00010000-\U0010FFFF]', words[1]):
-        content, emoji = words
-    else:
-        content, emoji = content_with_emoji, ""
+    delay = 0.5
+    content = content_with_options
+    emoji = ""
+
+    delay_match = re.search(r'delay\s*=\s*([\d.]+)', content_with_options, re.IGNORECASE)
+    if delay_match:
+        try:
+            delay = float(delay_match.group(1))
+            content = re.sub(r'delay\s*=\s*[\d.]+', '', content_with_options, flags=re.IGNORECASE).strip()
+        except:
+            pass
+
+    if content:
+        words = content.rsplit(' ', 1)
+        if len(words) == 2:
+            last_word = words[1]
+            emoji_pattern = re.compile(r'[\U00010000-\U0010FFFF]', flags=re.UNICODE)
+            if emoji_pattern.search(last_word):
+                emoji = last_word
+                content = words[0]
     if not content:
         content = "spam"
     msg = f"{content} {emoji}".strip()
@@ -803,6 +879,7 @@ async def solo(ctx, target: discord.Member, amount: int, delay: float = 0.5, *, 
         await asyncio.sleep(0.5)
 
     await ctx.send(f"🎮 Bắt đầu solo {amount} lần với {target.mention}! (delay {delay}s, nội dung: {msg})")
+
     async def spam_task():
         try:
             for i in range(amount):
@@ -815,6 +892,7 @@ async def solo(ctx, target: discord.Member, amount: int, delay: float = 0.5, *, 
         finally:
             if ctx.channel.id in solo_tasks:
                 del solo_tasks[ctx.channel.id]
+
     task = asyncio.create_task(spam_task())
     solo_tasks[ctx.channel.id] = task
 
