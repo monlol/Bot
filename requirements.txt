@@ -5,3 +5,4 @@ aiohttp
 asyncio
 deep-translator
 langdetect
+hashlib
